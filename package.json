@@ -1,0 +1,9 @@
+{
+  "name": "tokybook-downloader",
+  "module": "server.js",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^5.1.0"
+  },
+  "type": "module"
+}
