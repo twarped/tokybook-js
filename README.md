@@ -1,15 +1,47 @@
 # tokybook-downloader
 
-To install dependencies:
+requires `bun` and `ffmpeg`
+---
+install `bun` with:
+```bash
+# linux/macOS:
+curl -fsSL https://bun.sh/install | bash
+
+# windows:
+powershell -c "irm bun.sh/install.ps1 | iex"
+```
+
+install `ffmpeg` with:
+```bash
+# ubuntu/debian:
+sudo apt update
+sudo apt install ffmpeg
+
+# fedora:
+sudo dnf install ffmpeg
+
+# arch linux:
+sudo pacman -S ffmpeg
+
+# alpine:
+sudo apk add ffmpeg
+
+# windows:
+winget install Gyan.FFmpeg
+```
+
+to install dependencies:
+---
 
 ```bash
 bun install
 ```
 
-To run:
+to run:
+---
 
 ```bash
 bun run server.js
 ```
 
-This project was created using `bun init` in bun v1.1.42. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+this project was created using `bun init` in bun v1.1.42. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
