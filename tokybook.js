@@ -6,67 +6,91 @@ import archiver from 'archiver';
 
 function decodeHtmlEntities(str) {
   return str.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))
-            .replace(/&quot;/g, '"')
-            .replace(/&apos;/g, "'")
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>');
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
 }
 
 export async function getBookDetails(url) {
-  const headers = {
-    'referer': url,
-    'x-audiobook-id': '',
-    'x-playback-token': ''
-  };
-  const details = {
-    title: '',
-    author: '',
-    narrators: [],
-    cover: '',
-  }
-  console.log("getting details for: ", url)
-  let html = await (await fetch({
-    url,
-    headers,
-  })).text();
-  const secrets = html.match(/data-book-id="(.*)"\s*data-token="(.*)"/);
-  headers['x-audiobook-id'] = secrets[1];
-  headers['x-playback-token'] = secrets[2];
-  details.title = decodeHtmlEntities(html.match(/<title>(.*?)<\/title>/)[1]);
-  details.author = decodeHtmlEntities(html.match(/<!-- Author Info -->.*?>([^<]+)<\/p>/ms)[1]);
-  const narratorsGroup = html.match(/Narrators:<\/span>.*?<\/div>/ms);
-  if (narratorsGroup) {
-    details.narrators = [...narratorsGroup[0].matchAll(/<a[^>]*>(.*?)<\/a>/g)].map(m => decodeHtmlEntities(m[1]));
-  }
-  const coverPath = html.match(/<!-- Left Column: Cover Image -->.*?<img src="(.*?)".*?<\/div>/ms)[1];
-  details.cover = coverPath.startsWith('http') ? coverPath : 'https://tokybook.com' + coverPath;
-  return { headers, details }
+  const slug = JSON.stringify(url.match(/tokybook.com\/post\/([^\/?]+)/)[1]);
+  console.log("getting details for: ", `{"dynamicSlugId":${slug}}`)
+  return await (await fetch({
+    url: 'https://tokybook.com/api/v1/search/post-details',
+    method: "POST",
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: `{"dynamicSlugId":${slug}}`
+  })).json()
 }
 
-function isMp3(track) {
-  if (track.src.endsWith('.mp3'))
+function isMp3(src) {
+  if (src.startsWith('http://') || src.startsWith('https://'))
     return true;
   return false;
 }
 
-export async function getTracks(headers, details) {
-  const html = await (await fetch({
-    url: 'https://tokybook.com/player',
-    headers,
-  })).text();
+export function startTokyBookProxy(port = 0) {
+  return Bun.serve({
+    port,
+    async fetch(req) {
+      const url = new URL(req.url)
+      const path = url.pathname + url.search
+      const headers = new Headers(req.headers)
+      headers.set('host', 'tokybook.com')
+      // always set the x-track-src because why not (important for .ts streaming)
+      headers.set('x-track-src', path)
+      const response = await fetch({
+        url: `https://tokybook.com${path}`,
+        method: req.method,
+        headers: headers,
+        mode: req.mode,
+        referrer: req.referrer,
+        referrerPolicy: req.referrerPolicy,
+        body: req.body,
+      })
+      const responseHeaders = response.headers
+      responseHeaders.delete('content-encoding')
+      responseHeaders.delete('content-length')
 
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
+    }
+  });
+}
+
+// origin is just the http://localhost:port to tokybook proxy
+export async function getTracks(bookDetails, origin) {
   // track.src -> playlist file or mp3
-  let tracks = [...html.matchAll(/data-track-src="([^\"]+)/g)]
+  let playlist = await (await fetch({
+    url: 'https://tokybook.com/api/v1/playlist',
+    method: 'post',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      audioBookId: bookDetails.audioBookId,
+      postDetailToken: bookDetails.postDetailToken
+    })
+  })).json()
+
   // attach the request headers to each track so downstream code (ffmpeg/fetch)
   // can reuse them when fetching playlist/segments
-  tracks = tracks.map(([_, src], i) => ({
-    src: isMp3({ src }) ? src : 'https://tokybook.com' + src,
-    name: details ? `${details.title} - Chapter ${i + 1}` : src.split('/').pop().split('.').slice(0, -1).join('') + '.mp3',
-    isMp3: isMp3({ src }),
+  let tracks = playlist.tracks.map(({ src }, i, _isMp3) => (_isMp3 = isMp3(src), src = _isMp3 ? src : `${origin}/api/v1/public/audio/${src}`, {
+    src,
+    name: bookDetails ? `${bookDetails.title} - Chapter ${i + 1}` : src.split('/').pop().split('.').slice(0, -1).join('') + '.mp3',
     number: i + 1,
-    headers
-  }));
+    isMp3: _isMp3,
+    headers: {
+      'x-audiobook-id': playlist.audioBookId,
+      'x-stream-token': playlist.streamToken,
+    }
+  }))
 
   return tracks;
 }
@@ -95,7 +119,7 @@ export async function compileTrack(track, onError) {
     k.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('-') + ': ' + v
   ).join('\r\n') + (Object.keys(headersObj).length ? '\r\n' : '')
 
-  console.log("compiling track: ", track.name)
+  console.log('compiling track: ', track.name)
 
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
@@ -143,27 +167,26 @@ export async function compileTrack(track, onError) {
   return pass
 }
 
-export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError) {
+// origin is just the tokybook proxy http://hostname:port
+export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError, origin) {
   // return an object with a done promise and abort function so callers can cancel
   const activeProcs = new Set()
   let archive
 
   const done = (async () => {
     // get details and tracks
-    let headers, details
+    let bookDetails
     try {
-      const result = await getBookDetails(url)
-      headers = result.headers
-      details = result.details
+      bookDetails = await getBookDetails(url)
     } catch (err) {
       if (onError) onError(err)
       throw err
     }
-    if (onDetails) onDetails({ headers, details })
+    if (onDetails) onDetails(bookDetails)
 
     let tracks
     try {
-      tracks = await getTracks(headers, details)
+      tracks = await getTracks(bookDetails, origin)
     } catch (err) {
       if (onError) onError(err)
       throw err
@@ -188,7 +211,7 @@ export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError)
         stream = await compileTrack(track, onError)
       } catch (err) {
         if (onError) onError(err)
-        try { archive.abort(); } catch (e) {}
+        try { archive.abort(); } catch (e) { }
         throw err
       }
 
@@ -205,7 +228,7 @@ export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError)
         }
       } catch (err) {
         if (onError) onError(err)
-        try { archive.abort(); } catch (e) {}
+        try { archive.abort(); } catch (e) { }
         throw err
       } finally {
         // cleanup tracked proc
@@ -227,14 +250,14 @@ export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError)
   let isAborting = false
   const abort = () => {
     isAborting = true
-    try { if (archive) archive.abort() } catch (e) {}
+    try { if (archive) archive.abort() } catch (e) { }
     for (const p of activeProcs) {
-      try { p._killedByAbort = true; p.kill('SIGTERM') } catch (e) {}
+      try { p._killedByAbort = true; p.kill('SIGTERM') } catch (e) { }
     }
     // give processes a moment, then force kill
     setTimeout(() => {
       for (const p of activeProcs) {
-        try { if (!p.killed) { p._killedByAbort = true; p.kill('SIGKILL') } } catch (e) {}
+        try { if (!p.killed) { p._killedByAbort = true; p.kill('SIGKILL') } } catch (e) { }
       }
       activeProcs.clear()
     }, 250)
