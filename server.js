@@ -1,5 +1,9 @@
 import express from 'express';
-import { pipeBook } from './tokybook.js';
+import { pipeBook, startTokyBookProxy } from './tokybook.js';
+
+const tokybookProxy = startTokyBookProxy()
+const tokybookProxyOrigin = `http://${tokybookProxy.hostname}:${tokybookProxy.port}`
+console.log('tokybook proxy running on: ', tokybookProxyOrigin)
 
 const app = express();
 const PORT = 3000;
@@ -31,33 +35,32 @@ app.get('/download/book', async (req, res) => {
       // best-effort
       console.error('failed to write error to response', writeErr);
     } finally {
-      try { res.end(); } catch (e) {}
+      try { res.end(); } catch (e) { }
     }
   };
 
   try {
     // call pipeBook with the url and a writable stream
-    const { done, abort } = pipeBook(url, res, (details) => {
-      console.log(details);
-      bookDetails = details;
+    const { done, abort } = pipeBook(url, res, bookDetails => {
+      console.log(bookDetails);
       // set filename when details arrive
       if (!res.headersSent) {
-        res.setHeader('content-disposition', `attachment; filename="${bookDetails.details.title}.zip"`);
+        res.setHeader('content-disposition', `attachment; filename="${bookDetails.title.replace(/[^A-Za-z0-9\-\.\_]/g, '')}.zip"; filename*=UTF-8''${encodeURIComponent(bookDetails.title)}.zip`);
       }
     }, (track, duration) => {
       console.log(`finished track ${track.number} in ${Math.round(duration / 1000)}s`);
-    }, onError);
+    }, onError, tokybookProxyOrigin);
 
     // if client disconnects, abort work
     req.on('close', () => {
       console.log('client disconnected, aborting')
       try { abort() } catch (e) { console.error('abort failed', e) }
-      try { res.destroy(); } catch (e) {}
+      try { res.destroy(); } catch (e) { }
     })
 
     await done
-    if (bookDetails && bookDetails.details) {
-      console.log(`finished downloading book: ${bookDetails.details.title}`);
+    if (bookDetails) {
+      console.log(`finished downloading book: ${bookDetails.title}`);
     }
   } catch (err) {
     // final catch for unexpected thrown errors
@@ -69,4 +72,5 @@ app.get('/download/book', async (req, res) => {
 app.listen(PORT, () => {
   // log server start
   console.log(`server running on port ${PORT}`);
+  console.log(`ctrl-click here -> http://localhost:3000/`)
 });
