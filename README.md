@@ -26,8 +26,13 @@ sudo pacman -S ffmpeg
 # alpine:
 sudo apk add ffmpeg
 
+# macOS
+brew install ffmpeg
+# install brew with:
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
 # windows:
-winget install Gyan.FFmpeg
+winget install ffmpeg
 ```
 
 to install dependencies:
