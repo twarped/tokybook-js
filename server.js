@@ -15,7 +15,7 @@ app.use(express.static('public/static'));
 // root route returns hello world
 app.get('/', (req, res) => {
   // send index.html from public directory using absolute path
-  res.sendFile(process.cwd() + '/public/index.html');
+  res.sendFile(import.meta.dir + '/public/index.html');
 });
 
 app.get('/download/book', async (req, res) => {
@@ -25,8 +25,11 @@ app.get('/download/book', async (req, res) => {
   let start = Date.now();
   let bookDetails;
   // prepare response as a streaming attachment; set disposition once details are available
-  // onError will write error messages into the response and end it
+  // make onError idempotent so multiple callers don't double-report the same error
+  let errorReported = false
   const onError = (err) => {
+    if (errorReported) return
+    errorReported = true
     try {
       console.error('stream error:', err);
       if (!res.headersSent) {
@@ -34,6 +37,7 @@ app.get('/download/book', async (req, res) => {
         res.statusCode = 500;
       }
       // write the error and end the response
+      if (res.writableEnded) return;
       res.write(`ERROR: ${err && err.message ? err.message : String(err)}\n`);
     } catch (writeErr) {
       // best-effort
