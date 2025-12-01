@@ -116,7 +116,10 @@ export async function compileTrack(track, onError) {
     ffmpeg.stderr.on('data', (c) => console.error('ffmpeg:', String(c)))
   }
   // handle process close: if killed by signal, assume abort and don't surface as error
+  let loggedClose = false
   ffmpeg.on('close', (code, signal) => {
+    if (loggedClose) return
+    loggedClose = true
     // if we previously marked this process as killed by our abort flow,
     // treat this as intentional and don't surface an error.
     if (ffmpeg._killedByAbort) {
