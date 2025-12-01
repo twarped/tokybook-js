@@ -3,19 +3,9 @@ import { Readable, PassThrough } from 'stream'
 import { finished } from 'stream/promises'
 import archiver from 'archiver';
 
-
-function decodeHtmlEntities(str) {
-  return str.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
 export async function getBookDetails(url) {
   const slug = JSON.stringify(url.match(/tokybook.com\/post\/([^\/?]+)/)[1]);
-  console.log("getting details for: ", `{"dynamicSlugId":${slug}}`)
+  console.log("getting details for: ", slug)
   return await (await fetch({
     url: 'https://tokybook.com/api/v1/search/post-details',
     method: "POST",
@@ -36,34 +26,20 @@ export function startTokyBookProxy(port = 0) {
   return Bun.serve({
     port,
     async fetch(req) {
-      const url = new URL(req.url)
-      const path = url.pathname + url.search
-      const headers = new Headers(req.headers)
-      headers.set('host', 'tokybook.com')
-      // always set the x-track-src because why not (important for .ts streaming)
-      headers.set('x-track-src', path)
-      const response = await fetch({
-        url: `https://tokybook.com${path}`,
-        method: req.method,
-        headers: headers,
-        mode: req.mode,
-        referrer: req.referrer,
-        referrerPolicy: req.referrerPolicy,
-        body: req.body,
-      })
-      const responseHeaders = response.headers
-      responseHeaders.delete('content-encoding')
-      responseHeaders.delete('content-length')
+      const url = new URL(req.url);
+      const path = url.pathname + url.search;
 
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      })
+      // modify request headers in-place
+      req.headers.set("host", "tokybook.com");
+      // add custom authentication header for tokybook
+      req.headers.set("x-track-src", path);
+      // tell upstream: no compression
+      req.headers.set("accept-encoding", "identity");
+
+      return fetch(`https://tokybook.com${path}`, req);
     }
   });
 }
-
 // origin is just the http://localhost:port to tokybook proxy
 export async function getTracks(bookDetails, origin) {
   // track.src -> playlist file or mp3
@@ -83,7 +59,7 @@ export async function getTracks(bookDetails, origin) {
   // can reuse them when fetching playlist/segments
   let tracks = playlist.tracks.map(({ src }, i, _isMp3) => (_isMp3 = isMp3(src), src = _isMp3 ? src : `${origin}/api/v1/public/audio/${src}`, {
     src,
-    name: bookDetails ? `${bookDetails.title} - Chapter ${i + 1}` : src.split('/').pop().split('.').slice(0, -1).join('') + '.mp3',
+    name: bookDetails ? `${bookDetails.title} - Chapter ${i + 1}.mp3` : src.split('/').pop().split('.').slice(0, -1).join('') + '.mp3',
     number: i + 1,
     isMp3: _isMp3,
     headers: {
@@ -168,7 +144,7 @@ export async function compileTrack(track, onError) {
 }
 
 // origin is just the tokybook proxy http://hostname:port
-export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError, origin) {
+export function pipeBook(url, writableStream, onDetails, onTracks, onTrackFinish, onError, origin) {
   // return an object with a done promise and abort function so callers can cancel
   const activeProcs = new Set()
   let archive
@@ -191,6 +167,7 @@ export function pipeBook(url, writableStream, onDetails, onTrackFinish, onError,
       if (onError) onError(err)
       throw err
     }
+    if (onTracks) onTracks(tracks)
 
     // create zip archive
     archive = archiver('zip', { zlib: { level: 9 } })
